@@ -1,0 +1,10 @@
+# Environment / secrets
+.env
+
+# Repositories cloned locally by the wizard while resolving issues
+/repos/
+
+# Build artifacts
+*.exe
+*.test
+*.out
