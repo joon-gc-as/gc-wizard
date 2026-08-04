@@ -7,10 +7,11 @@ import (
 	"net/http"
 	"regexp"
 	"strings"
-
+	
 	"github.com/go-chi/chi/v5"
 	"github.com/google/go-github/v89/github"
 	"github.com/gummicube/gc-wizard/internal/agents"
+	"github.com/gummicube/gc-wizard/internal/commands"
 	"github.com/gummicube/gc-wizard/internal/remotes"
 )
 
@@ -21,6 +22,7 @@ func Github() chi.Router {
 	r.Post("/github", func(w http.ResponseWriter, r *http.Request) {
 		ghs := remotes.Service
 		event, err := ghs.ValidateRequest(r)
+		fmt.Printf("event triggered")
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusUnauthorized)
 			return
@@ -38,6 +40,8 @@ func Github() chi.Router {
 }
 
 func handleIssueAssignedEvent(r *http.Request, e *github.IssuesEvent) {
+	fmt.Printf("came to the handle issued assigned event: %v\n", e)
+	return
 	if e.GetAction() != "assigned" || e.GetAssignee().GetLogin() != wizardUsername {
 		return
 	}
@@ -56,34 +60,24 @@ func handleIssueAssignedEvent(r *http.Request, e *github.IssuesEvent) {
 	}()
 }
 
-// resolveIssue clones (or refreshes) the repo the issue lives in, hands the
-// issue off to Claude Code to attempt a fix, and if it changed anything,
-// pushes the result to a new branch and opens a pull request.
 func resolveIssue(ctx context.Context, owner, repoName string, issue *github.Issue) error {
 	if owner == "" || repoName == "" {
 		return fmt.Errorf("issue event is missing repository owner/name")
 	}
-
 	ghs := remotes.Service
-	if ghs.Token() == "" {
-		// Client() would otherwise log.Fatal on first use, which would take
-		// the whole server down over one misconfigured webhook.
-		return fmt.Errorf("GITHUB_TOKEN is not configured")
-	}
 
-	repo, err := ghs.GetRepository(ctx, owner, repoName)
+	defBranch, err := ghs.GetDefaultBranch(ctx, owner, repoName)
 	if err != nil {
 		return fmt.Errorf("get repository: %w", err)
 	}
-	defaultBranch := repo.GetDefaultBranch()
 
-	repoPath, err := ghs.EnsureRepo(ctx, owner, repoName, defaultBranch, ghs.Token())
+	repoPath, err := commands.Git.EnsureRepo(ctx, owner, repoName, defBranch)
 	if err != nil {
 		return fmt.Errorf("ensure repo: %w", err)
 	}
 
-	branch := branchNameForIssue(issue)
-	if err := ghs.LocalCreateBranch(ctx, repoPath, branch); err != nil {
+	branch := nameBranchForIssue(issue)
+	if err := commands.Git.CreateLocalBranch(ctx, repoPath, branch); err != nil {
 		return fmt.Errorf("create branch: %w", err)
 	}
 
@@ -92,13 +86,13 @@ func resolveIssue(ctx context.Context, owner, repoName string, issue *github.Iss
 			"code changes are needed; don't just describe the fix.\n\nTitle: %s\n\n%s",
 		issue.GetTitle(), issue.GetBody(),
 	)
-	reply, err := agents.RunClaudeCode(ctx, repoPath, prompt)
+	reply, err := agents.AnthropicClaude.ResolveIssue(ctx, repoPath, prompt)
 	if err != nil {
-		return fmt.Errorf("claude code: %w", err)
+		return fmt.Errorf("anthropic: %w", err)
 	}
-	log.Printf("issue #%d: claude code resolution attempt:\n%s", issue.GetNumber(), reply)
+	log.Printf("issue #%d: claude resolution attempt:\n%s", issue.GetNumber(), reply)
 
-	changed, err := ghs.HasChanges(ctx, repoPath)
+	changed, err := commands.Git.HasChanges(ctx, repoPath)
 	if err != nil {
 		return fmt.Errorf("check for changes: %w", err)
 	}
@@ -107,16 +101,16 @@ func resolveIssue(ctx context.Context, owner, repoName string, issue *github.Iss
 	}
 
 	commitMsg := fmt.Sprintf("Fix: %s\n\nResolves #%d", issue.GetTitle(), issue.GetNumber())
-	if err := ghs.CommitAll(ctx, repoPath, commitMsg); err != nil {
+	if err := commands.Git.CommitAll(ctx, repoPath, commitMsg); err != nil {
 		return fmt.Errorf("commit changes: %w", err)
 	}
-	if err := ghs.Push(ctx, repoPath, branch); err != nil {
+	if err := commands.Git.Push(ctx, repoPath, branch); err != nil {
 		return fmt.Errorf("push branch: %w", err)
 	}
 
 	prTitle := fmt.Sprintf("Fix: %s", issue.GetTitle())
 	prBody := fmt.Sprintf("Resolves #%d\n\n---\n\n%s", issue.GetNumber(), reply)
-	pr, err := ghs.CreatePullRequest(ctx, owner, repoName, prTitle, branch, defaultBranch, prBody)
+	pr, err := ghs.CreatePullRequest(ctx, owner, repoName, prTitle, branch, defBranch, prBody)
 	if err != nil {
 		return fmt.Errorf("create pull request: %w", err)
 	}
@@ -126,9 +120,7 @@ func resolveIssue(ctx context.Context, owner, repoName string, issue *github.Iss
 }
 
 
-// branchNameForIssue derives a remote branch name from the issue number and
-// a slugified version of its title, e.g. "gc-wizard/issue-42-something-is-broken".
-func branchNameForIssue(issue *github.Issue) string {
+func nameBranchForIssue(issue *github.Issue) string {
 	branchSlugPattern := regexp.MustCompile(`[^a-z0-9]+`)
 	slug := strings.Trim(branchSlugPattern.ReplaceAllString(strings.ToLower(issue.GetTitle()), "-"), "-")
 	if len(slug) > 40 {

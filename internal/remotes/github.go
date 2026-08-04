@@ -6,22 +6,14 @@ import (
 	"log"
 	"net/http"
 	"os"
-	"os/exec"
-	"path/filepath"
 	"sync"
 
 	"github.com/google/go-github/v89/github"
 )
 
-// ReposDir is the root directory (relative to the process working
-// directory) under which repositories are cloned.
-const ReposDir = "repos"
-
 type githubService struct{}
-type githubCommand struct{}
 
 var Service = &githubService{}
-var Command = &githubCommand{}
 
 var githubClient = sync.OnceValue(func() *github.Client {
 	token := os.Getenv("GITHUB_TOKEN")
@@ -96,14 +88,13 @@ func (s *githubService) ValidateRequest(r *http.Request) (any, error) {
 	return event, nil
 }
 
-// GetRepository fetches repository metadata, e.g. to resolve the default
-// branch and clone URL.
-func (s *githubService) GetRepository(ctx context.Context, owner, repo string) (*github.Repository, error) {
+func (s *githubService) GetDefaultBranch(ctx context.Context, owner, repo string) (string, error) {
 	r, _, err := s.Client().Repositories.Get(ctx, owner, repo)
 	if err != nil {
-		return nil, fmt.Errorf("get repository %s/%s: %w", owner, repo, err)
+		return "", fmt.Errorf("get repository %s/%s: %w", owner, repo, err)
 	}
-	return r, nil
+	br := r.GetDefaultBranch()
+	return br, nil
 }
 
 // CreatePullRequest opens a pull request from head into base.
@@ -137,92 +128,3 @@ func (s *githubService) CreateBranch(ctx context.Context, owner, repo, baseBranc
 	return nil
 }
 
-// EnsureRepo makes sure owner/repo is cloned locally under ReposDir and
-// checked out to the latest defaultBranch, returning its local path. If the
-// repo was already cloned, it is fetched and reset instead of re-cloned.
-func (s *githubService) EnsureRepo(ctx context.Context, owner, repo, defaultBranch, token string) (string, error) {
-	root, err := filepath.Abs(ReposDir)
-	if err != nil {
-		return "", fmt.Errorf("resolve repos dir: %w", err)
-	}
-	if err := os.MkdirAll(root, 0o755); err != nil {
-		return "", fmt.Errorf("create repos dir: %w", err)
-	}
-
-	path := filepath.Join(root, repo)
-	remote := fmt.Sprintf("https://x-access-token:%s@github.com/%s/%s.git", token, owner, repo)
-
-	if _, err := os.Stat(filepath.Join(path, ".git")); err == nil {
-		if err := run(ctx, path, "git", "remote", "set-url", "origin", remote); err != nil {
-			return "", err
-		}
-		if err := run(ctx, path, "git", "fetch", "origin", defaultBranch); err != nil {
-			return "", err
-		}
-		if err := run(ctx, path, "git", "checkout", defaultBranch); err != nil {
-			return "", err
-		}
-		if err := run(ctx, path, "git", "reset", "--hard", "origin/"+defaultBranch); err != nil {
-			return "", err
-		}
-		if err := run(ctx, path, "git", "clean", "-fd"); err != nil {
-			return "", err
-		}
-	} else if os.IsNotExist(err) {
-		if err := run(ctx, root, "git", "clone", "--branch", defaultBranch, remote, repo); err != nil {
-			return "", err
-		}
-	} else {
-		return "", fmt.Errorf("stat repo path: %w", err)
-	}
-
-	if err := run(ctx, path, "git", "config", "user.name", "gc-wizard"); err != nil {
-		return "", err
-	}
-	if err := run(ctx, path, "git", "config", "user.email", "gc-wizard@users.noreply.github.com"); err != nil {
-		return "", err
-	}
-
-	return path, nil
-}
-
-// LocalCreateBranch checks out a new branch from the current HEAD in the
-// local checkout at path.
-func (s *githubService) LocalCreateBranch(ctx context.Context, path, branch string) error {
-	return run(ctx, path, "git", "checkout", "-b", branch)
-}
-
-// HasChanges reports whether the working tree has uncommitted changes
-// (tracked or untracked).
-func (s *githubService) HasChanges(ctx context.Context, path string) (bool, error) {
-	cmd := exec.CommandContext(ctx, "git", "status", "--porcelain")
-	cmd.Dir = path
-	out, err := cmd.Output()
-	if err != nil {
-		return false, fmt.Errorf("git status: %w", err)
-	}
-	return len(out) > 0, nil
-}
-
-// CommitAll stages every change in the working tree and commits it.
-func (s *githubService) CommitAll(ctx context.Context, path, message string) error {
-	if err := run(ctx, path, "git", "add", "-A"); err != nil {
-		return err
-	}
-	return run(ctx, path, "git", "commit", "-m", message)
-}
-
-// Push pushes branch to origin, creating it remotely and setting upstream.
-func (s* githubService) Push(ctx context.Context, path, branch string) error {
-	return run(ctx, path, "git", "push", "-u", "origin", branch)
-}
-
-func run(ctx context.Context, dir, name string, args ...string) error {
-	cmd := exec.CommandContext(ctx, name, args...)
-	cmd.Dir = dir
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("%s %v: %w: %s", name, args, err, out)
-	}
-	return nil
-}

@@ -29,5 +29,7 @@ func WizardHandler() http.Handler {
 	
 	// Routes
 	r.Mount("/github", routes.Github())
+	// r.Mount("/anthropic", routes.Anthropic()) // future endpoint to list/edit anthropic (claude) settings. we want them in env for now
+	// r.Mount("/openai", routes.OpenAI()) // future endpoint to list/edit OpenAI (codex) settings. if we use codex
 	return r
 }

@@ -3,22 +3,20 @@ package agents
 import (
 	"context"
 	"fmt"
-	"github.com/anthropics/anthropic-sdk-go"
-	"github.com/anthropics/anthropic-sdk-go/option"
-	"github.com/google/go-github/v89/github"
 	"log"
 	"os"
 	"strings"
 	"sync"
+
+	"github.com/anthropics/anthropic-sdk-go"
+	"github.com/anthropics/anthropic-sdk-go/option"
+	"github.com/anthropics/anthropic-sdk-go/tools/agenttoolset"
 )
 
 type anthropicService struct{}
 
-var AnthropicAgent = &anthropicService{}
+var AnthropicClaude = &anthropicService{}
 
-// anthropicClient is created lazily (rather than at package init) so that
-// importing this package doesn't hard-fail processes, like tests, that never
-// actually need an Anthropic client and haven't loaded ANTHROPIC_API_KEY.
 var anthropicClient = sync.OnceValue(func() anthropic.Client {
 	token := os.Getenv("ANTHROPIC_API_KEY")
 	if token == "" {
@@ -27,21 +25,45 @@ var anthropicClient = sync.OnceValue(func() anthropic.Client {
 	return anthropic.NewClient(option.WithAPIKey(token))
 })
 
-func (s *anthropicService) ResolveIssue(ctx context.Context, issue *github.Issue) (string, error) {
+// NOTE: PLEASE READ WHY client.Beta is being used over client.Messages
+//  - Tool Runner (client.Beta.Messages.NewToolRunner) — anytime you want the SDK to run the agentic loop
+//  instead of writing it manually (for loops/max iterations)
+//  - The prebuilt agent toolset (what's used here) or Managed Agents (client.Beta.Agents, client.Beta.Sessions,
+//  client.Beta.Environments) — hosted/managed agent primitives
+//  - Context editing, compaction, MCP connector, advisor tool, memory tool, cache diagnostics — all beta
+//  - Plain single-shot Messages.New calls with no beta features → use client.Messages.New, not
+//  client.Beta.Messages.New
+
+//  One thing worth flagging: this file is using ModelClaudeSonnet5 as the model (line 41) with the Tool Runner
+//  — that's fine, but note git status shows internal/agents/claude_code.go was deleted and this anthropic.go
+//  seems to be its replacement. Let me know if you want me to look at anything else in this file (e.g., the
+//  sync.OnceValue client init, or whether error handling around runner.RunToCompletion needs adjustment).
+func (s *anthropicService) ResolveIssue(ctx context.Context, repoPath, prompt string) (string, error) {
 	client := anthropicClient()
-	message, err := client.Messages.New(ctx, anthropic.MessageNewParams{
-		MaxTokens: 1024,
-		Messages: []anthropic.MessageParam{
-			anthropic.NewUserMessage(anthropic.NewTextBlock(issue.GetBody())),
+
+	env := &agenttoolset.AgentToolContext{Workdir: repoPath}
+
+	tools := agenttoolset.BetaAgentToolset20260401(env)
+	defer agenttoolset.CloseAll(tools)
+
+	runner := client.Beta.Messages.NewToolRunner(tools, anthropic.BetaToolRunnerParams{
+		BetaMessageNewParams: anthropic.BetaMessageNewParams{
+			Model:     anthropic.ModelClaudeSonnet5,
+			MaxTokens: 8192,
+			Messages: []anthropic.BetaMessageParam{
+				anthropic.NewBetaUserMessage(anthropic.NewBetaTextBlock(prompt)),
+			},
 		},
-		Model: anthropic.ModelClaudeOpus4_8,
 	})
+
+	message, err := runner.RunToCompletion(ctx)
 	if err != nil {
 		return "", fmt.Errorf("anthropic: %w", err)
 	}
+
 	var reply strings.Builder
 	for _, block := range message.Content {
-		if textBlock, ok := block.AsAny().(anthropic.TextBlock); ok {
+		if textBlock, ok := block.AsAny().(anthropic.BetaTextBlock); ok {
 			reply.WriteString(textBlock.Text)
 		}
 	}

@@ -5,10 +5,12 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"os"
 	"os/signal"
 	"syscall"
 	"time"
 	"github.com/joho/godotenv"
+	"github.com/gummicube/gc-wizard/internal/proxy"
 	"github.com/gummicube/gc-wizard/internal/server"
 )
 
@@ -36,6 +38,13 @@ func main() {
 		log.Fatalf("Error loading .env file: %v", err)
 	}
 	wiz := server.Wizard()
+
+	// local reverse proxy from smee.io to this current app
+	proxyCtx, stopProxy := context.WithCancel(context.Background())
+	defer stopProxy()
+	if smeeURL := os.Getenv("SMEE_URL"); smeeURL != "" {
+		go proxy.ForwardGHEventsToLocalApp(proxyCtx, smeeURL)
+	}
 
 	done := make(chan bool, 1)
 	go gracefulShutdown(wiz, done)
