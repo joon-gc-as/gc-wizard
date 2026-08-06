@@ -136,6 +136,60 @@ func (c *gitCommand) CreateLocalBranch(ctx context.Context, path, branch string)
 	return nil
 }
 
+// CheckoutBranch fetches branch from origin and checks it out in the local
+// checkout at path, resetting the working tree to match the remote exactly.
+// Unlike CreateLocalBranch, branch is expected to already exist on origin
+// (e.g. an open pull request's head branch).
+func (c *gitCommand) CheckoutBranch(ctx context.Context, owner, repo, path, branch string) error {
+	auth, err := authOption()
+	if err != nil {
+		return err
+	}
+	r, err := git.PlainOpen(path)
+	if err != nil {
+		return fmt.Errorf("open repo: %w", err)
+	}
+
+	remote := fmt.Sprintf("https://github.com/%s/%s.git", owner, repo)
+	refSpec := config.RefSpec(fmt.Sprintf("+refs/heads/%s:refs/remotes/origin/%s", branch, branch))
+	if err := r.FetchContext(ctx, &git.FetchOptions{
+		RemoteURL:     remote,
+		RefSpecs:      []config.RefSpec{refSpec},
+		ClientOptions: []client.Option{auth},
+		Force:         true,
+	}); err != nil && err != git.NoErrAlreadyUpToDate {
+		return fmt.Errorf("fetch: %w", err)
+	}
+
+	remoteRef, err := r.Reference(plumbing.NewRemoteReferenceName("origin", branch), true)
+	if err != nil {
+		return fmt.Errorf("resolve remote branch: %w", err)
+	}
+
+	wt, err := r.Worktree()
+	if err != nil {
+		return fmt.Errorf("worktree: %w", err)
+	}
+
+	branchRef := plumbing.NewBranchReferenceName(branch)
+	// Create the local branch tracking the fetched commit the first time we
+	// see it; on later runs it already exists, so just switch to it.
+	create := true
+	if _, err := r.Reference(branchRef, true); err == nil {
+		create = false
+	}
+	if err := wt.Checkout(&git.CheckoutOptions{Branch: branchRef, Hash: remoteRef.Hash(), Create: create, Force: true}); err != nil {
+		return fmt.Errorf("checkout: %w", err)
+	}
+	if err := wt.Reset(&git.ResetOptions{Commit: remoteRef.Hash(), Mode: git.HardReset}); err != nil {
+		return fmt.Errorf("reset: %w", err)
+	}
+	if err := wt.Clean(&git.CleanOptions{Dir: true}); err != nil {
+		return fmt.Errorf("clean: %w", err)
+	}
+	return nil
+}
+
 // HasChanges reports whether the working tree has uncommitted changes
 // (tracked or untracked).
 func (c *gitCommand) HasChanges(ctx context.Context, path string) (bool, error) {

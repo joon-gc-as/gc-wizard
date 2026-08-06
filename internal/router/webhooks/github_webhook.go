@@ -5,13 +5,10 @@ import (
 	"fmt"
 	"log"
 	"net/http"
-	"regexp"
-	"strings"
-	
+
 	"github.com/go-chi/chi/v5"
 	"github.com/google/go-github/v89/github"
 	"github.com/gummicube/gc-wizard/internal/agents"
-	"github.com/gummicube/gc-wizard/internal/commands"
 	"github.com/gummicube/gc-wizard/internal/remotes"
 )
 
@@ -32,6 +29,12 @@ func Github() chi.Router {
 			handleIssueAssignedEvent(r, e)
 		case *github.IssueCommentEvent:
 			handleIssueCommentEvent(r, e)
+		case *github.PullRequestReviewEvent:
+			handlePullRequestReviewEvent(r, e)
+		case *github.PullRequestReviewCommentEvent:
+			handlePullRequestReviewCommentEvent(r, e)
+		case *github.CommitCommentEvent:
+			handleCommitCommentEvent(r, e)
 		}
 
 		w.WriteHeader(http.StatusOK)
@@ -39,10 +42,12 @@ func Github() chi.Router {
 	return r
 }
 
+///////////////////////////////////////////////////////////////////////////////
+//                         WHEN AN ISSUE IS ASSIGNED                         //
+///////////////////////////////////////////////////////////////////////////////
 func handleIssueAssignedEvent(r *http.Request, e *github.IssuesEvent) {
-	fmt.Printf("came to the handle issued assigned event: %v\n", e)
-	return
-	if e.GetAction() != "assigned" || e.GetAssignee().GetLogin() != wizardUsername {
+	assignee := e.GetIssue().GetAssignee().GetLogin()
+	if e.GetAction() != "assigned" || assignee != wizardUsername {
 		return
 	}
 	issue := e.GetIssue()
@@ -51,93 +56,80 @@ func handleIssueAssignedEvent(r *http.Request, e *github.IssuesEvent) {
 	log.Printf("issue #%d assigned to %s", issue.GetNumber(), wizardUsername)
 
 	// GitHub expects a fast response to the webhook; the fix/PR flow can
-	// take minutes, so it runs in the background off the request context.
+	// take minutes, so it runs in the background off the request context
 	go func() {
 		ctx := context.Background()
-		if err := resolveIssue(ctx, owner, repoName, issue); err != nil {
+		if err := agents.AnthropicClaude.ResolveGithubIssue(ctx, owner, repoName, issue); err != nil {
 			log.Printf("issue #%d: resolution failed: %v", issue.GetNumber(), err)
 		}
 	}()
 }
 
-func resolveIssue(ctx context.Context, owner, repoName string, issue *github.Issue) error {
-	if owner == "" || repoName == "" {
-		return fmt.Errorf("issue event is missing repository owner/name")
-	}
-	ghs := remotes.Service
-
-	defBranch, err := ghs.GetDefaultBranch(ctx, owner, repoName)
-	if err != nil {
-		return fmt.Errorf("get repository: %w", err)
-	}
-
-	repoPath, err := commands.Git.EnsureRepo(ctx, owner, repoName, defBranch)
-	if err != nil {
-		return fmt.Errorf("ensure repo: %w", err)
-	}
-
-	branch := nameBranchForIssue(issue)
-	if err := commands.Git.CreateLocalBranch(ctx, repoPath, branch); err != nil {
-		return fmt.Errorf("create branch: %w", err)
-	}
-
-	prompt := fmt.Sprintf(
-		"Resolve the following GitHub issue in this repository. Make whatever "+
-			"code changes are needed; don't just describe the fix.\n\nTitle: %s\n\n%s",
-		issue.GetTitle(), issue.GetBody(),
-	)
-	reply, err := agents.AnthropicClaude.ResolveIssue(ctx, repoPath, prompt)
-	if err != nil {
-		return fmt.Errorf("anthropic: %w", err)
-	}
-	log.Printf("issue #%d: claude resolution attempt:\n%s", issue.GetNumber(), reply)
-
-	changed, err := commands.Git.HasChanges(ctx, repoPath)
-	if err != nil {
-		return fmt.Errorf("check for changes: %w", err)
-	}
-	if !changed {
-		return fmt.Errorf("claude code made no changes")
-	}
-
-	commitMsg := fmt.Sprintf("Fix: %s\n\nResolves #%d", issue.GetTitle(), issue.GetNumber())
-	if err := commands.Git.CommitAll(ctx, repoPath, commitMsg); err != nil {
-		return fmt.Errorf("commit changes: %w", err)
-	}
-	if err := commands.Git.Push(ctx, repoPath, branch); err != nil {
-		return fmt.Errorf("push branch: %w", err)
-	}
-
-	prTitle := fmt.Sprintf("Fix: %s", issue.GetTitle())
-	prBody := fmt.Sprintf("Resolves #%d\n\n---\n\n%s", issue.GetNumber(), reply)
-	pr, err := ghs.CreatePullRequest(ctx, owner, repoName, prTitle, branch, defBranch, prBody)
-	if err != nil {
-		return fmt.Errorf("create pull request: %w", err)
-	}
-
-	log.Printf("issue #%d: opened pull request %s", issue.GetNumber(), pr.GetHTMLURL())
-	return nil
-}
-
-
-func nameBranchForIssue(issue *github.Issue) string {
-	branchSlugPattern := regexp.MustCompile(`[^a-z0-9]+`)
-	slug := strings.Trim(branchSlugPattern.ReplaceAllString(strings.ToLower(issue.GetTitle()), "-"), "-")
-	if len(slug) > 40 {
-		slug = strings.Trim(slug[:40], "-")
-	}
-	if slug == "" {
-		slug = "issue"
-	}
-	return fmt.Sprintf("gc-wizard/issue-%d-%s", issue.GetNumber(), slug)
-}
-
-func handleIssueCommentEvent(r *http.Request, e *github.IssueCommentEvent) {
-	if e.GetIssue().GetAssignee().GetLogin() != wizardUsername {
+///////////////////////////////////////////////////////////////////////////////
+//                        WHEN AN ISSUE HAS A COMMENT                        //
+///////////////////////////////////////////////////////////////////////////////
+func handleIssueCommentEvent(_ *http.Request, e *github.IssueCommentEvent) {
+	assignee := e.GetIssue().GetAssignee().GetLogin()
+	if assignee != wizardUsername {
 		return
 	}
+	issue := e.GetIssue()
+	owner := e.GetRepo().GetOwner().GetLogin()
+	repoName := e.GetRepo().GetName()
+	comment := e.GetComment()
 	log.Printf("comment on issue #%d (assigned to %s) by %s: %s",
-		e.GetIssue().GetNumber(), wizardUsername, e.GetComment().GetUser().GetLogin(), e.GetComment().GetBody(),
+		issue.GetNumber(), wizardUsername, comment.GetUser().GetLogin(), comment.GetBody(),
 	)
-	// TODO: different behaviour for follow-up comments on issues gc-wizard owns.
+	go func() {
+		ctx := context.Background()
+		if err := agents.AnthropicClaude.ResolveGithubIssueComment(ctx, owner, repoName, issue, comment); err != nil {
+			log.Printf("issue #%d: resolution failed: %v", issue.GetNumber(), err)
+		}
+	}()
+}
+
+///////////////////////////////////////////////////////////////////////////////
+//                                  WHEN PR REVIEW                           //
+///////////////////////////////////////////////////////////////////////////////
+func handlePullRequestReviewEvent(_ *http.Request, e *github.PullRequestReviewEvent) {
+	if e.GetPullRequest().GetAssignee().GetLogin() != wizardUsername {
+		return
+	}
+	pr := e.GetPullRequest()
+	review := e.GetReview()
+	owner := e.GetRepo().GetOwner().GetLogin()
+	repoName := e.GetRepo().GetName()
+	log.Printf("review on pull request #%d (assigned to %s) by %s: %s (%s)",
+		pr.GetNumber(), wizardUsername, review.GetUser().GetLogin(), review.GetState(), review.GetBody(),
+	)
+	go func() {
+		ctx := context.Background()
+		if err := agents.AnthropicClaude.ResolveGithubPullRequestReview(ctx, owner, repoName, pr, review); err != nil {
+			log.Printf("pull request #%d: resolution failed: %v", pr.GetNumber(), err)
+		}
+	}()
+}
+
+// TODO: IBID...
+///////////////////////////////////////////////////////////////////////////////
+//                         WHEN COMMIT HAS A COMMENT                         //
+///////////////////////////////////////////////////////////////////////////////
+func handleCommitCommentEvent(_ *http.Request, e *github.CommitCommentEvent) {
+	log.Printf("comment on commit %s by %s: %s",
+		e.GetComment().GetCommitID(), e.GetComment().GetUser().GetLogin(), e.GetComment().GetBody(),
+	)
+	// TODO: commit comments have no assignee to gate on; figure out how gc-wizard should react.
+}
+
+///////////////////////////////////////////////////////////////////////////////
+//                         WHEN PR HAS REVIEW COMMENT                        //
+///////////////////////////////////////////////////////////////////////////////
+func handlePullRequestReviewCommentEvent(_ *http.Request, e *github.PullRequestReviewCommentEvent) {
+	if e.GetPullRequest().GetAssignee().GetLogin() != wizardUsername {
+		return
+	}
+	log.Printf("review comment on pull request #%d (assigned to %s) by %s: %s",
+		e.GetPullRequest().GetNumber(), wizardUsername, e.GetComment().GetUser().GetLogin(), e.GetComment().GetBody(),
+	)
+	// TODO: feed review comments on gc-wizard's own pull requests back to claude.
 }

@@ -3,7 +3,7 @@
 .ONESHELL:
 SHELL := /bin/sh
 
-.PHONY: all setup run build test clean
+.PHONY: all run build test clean
 
 all: build test
 
@@ -18,4 +18,4 @@ build:
 # Clean the binary
 clean:
 	@echo "Cleaning..."
-	@rm -f main
+	@rm -f wizard

@@ -6,6 +6,8 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"regexp"
+	"strings"
 	"sync"
 
 	"github.com/google/go-github/v89/github"
@@ -100,15 +102,38 @@ func (s *githubService) GetDefaultBranch(ctx context.Context, owner, repo string
 // CreatePullRequest opens a pull request from head into base.
 func (s *githubService) CreatePullRequest(ctx context.Context, owner, repo, title, head, base, body string) (*github.PullRequest, error) {
 	pr, _, err := s.Client().PullRequests.Create(ctx, owner, repo, &github.NewPullRequest{
-		Title: github.Ptr(title),
-		Head:  github.Ptr(head),
-		Base:  github.Ptr(base),
-		Body:  github.Ptr(body),
+		Title: new(title),
+		Head:  new(head),
+		Base:  new(base),
+		Body:  new(body),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("create pull request: %w", err)
 	}
 	return pr, nil
+}
+
+// CreateIssueComment posts a comment on the given issue (or pull request,
+// since GitHub models PR conversations as issues under the hood).
+func (s *githubService) CreateIssueComment(ctx context.Context, owner, repo string, number int, body string) error {
+	if _, _, err := s.Client().Issues.CreateComment(ctx, owner, repo, number, &github.IssueComment{
+		Body: new(body),
+	}); err != nil {
+		return fmt.Errorf("create issue comment: %w", err)
+	}
+	return nil
+}
+
+func (s *githubService) NameBranchForIssue(issue *github.Issue) string {
+	branchSlugPattern := regexp.MustCompile(`[^a-z0-9]+`)
+	slug := strings.Trim(branchSlugPattern.ReplaceAllString(strings.ToLower(issue.GetTitle()), "-"), "-")
+	if len(slug) > 40 {
+		slug = strings.Trim(slug[:40], "-")
+	}
+	if slug == "" {
+		slug = "issue"
+	}
+	return fmt.Sprintf("gc-wizard/issue-%d-%s", issue.GetNumber(), slug)
 }
 
 func (s *githubService) CreateBranch(ctx context.Context, owner, repo, baseBranch, branch string) error {

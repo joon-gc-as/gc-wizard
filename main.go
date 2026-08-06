@@ -42,7 +42,7 @@ func main() {
 	// local reverse proxy from smee.io to this current app
 	proxyCtx, stopProxy := context.WithCancel(context.Background())
 	defer stopProxy()
-	if smeeURL := os.Getenv("SMEE_URL"); smeeURL != "" {
+	if smeeURL := os.Getenv("PROXY_URL"); os.Getenv("APP_ENV") != "PRODUCTION" && smeeURL != "" {
 		go proxy.ForwardGHEventsToLocalApp(proxyCtx, smeeURL)
 	}
 
