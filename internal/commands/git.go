@@ -33,7 +33,7 @@ var Git = &gitCommand{}
 // authOption builds the transport auth used to talk to GitHub over HTTPS,
 // from the same token remotes.Service authenticates its API client with.
 func authOption() (client.Option, error) {
-	token := remotes.Service.Token()
+	token := remotes.GithubService.Token()
 	if token == "" {
 		return nil, fmt.Errorf("GITHUB_TOKEN is not configured")
 	}
@@ -114,6 +114,80 @@ func (c *gitCommand) EnsureRepo(ctx context.Context, owner, repo, defaultBranch 
 	}
 
 	return path, nil
+}
+
+// RepoPath returns the local path owner/repo is (or would be) cloned to.
+func (c *gitCommand) RepoPath(repo string) (string, error) {
+	root, err := filepath.Abs(ReposDir)
+	if err != nil {
+		return "", fmt.Errorf("resolve repos dir: %w", err)
+	}
+	return filepath.Join(root, repo), nil
+}
+
+// CleanWorktree ensures the local checkout at path has no uncommitted or
+// unpushed changes before further work begins. If the repo hasn't been
+// cloned yet, there's nothing to clean. Otherwise it fetches whatever branch
+// is currently checked out and hard-resets the worktree to match origin,
+// discarding any local commits or changes that were never pushed. If the
+// current branch doesn't exist on origin (e.g. a local-only branch, or a
+// detached HEAD), it just discards uncommitted changes in place instead.
+func (c *gitCommand) CleanWorktree(ctx context.Context, owner, repo, path string) error {
+	// if _, err := os.Stat(filepath.Join(path, ".git")); os.IsNotExist(err) {
+	// 	return nil
+	// } else if err != nil {
+	// 	return fmt.Errorf("stat repo path: %w", err)
+	// }
+
+	r, err := git.PlainOpen(path)
+	if err != nil {
+		return fmt.Errorf("open repo: %w", err)
+	}
+	wt, err := r.Worktree()
+	if err != nil {
+		return fmt.Errorf("worktree: %w", err)
+	}
+
+	head, err := r.Head()
+	if err != nil {
+		return fmt.Errorf("resolve HEAD: %w", err)
+	}
+
+	discard := func(commit plumbing.Hash) error {
+		if err := wt.Reset(&git.ResetOptions{Commit: commit, Mode: git.HardReset}); err != nil {
+			return fmt.Errorf("reset: %w", err)
+		}
+		return wt.Clean(&git.CleanOptions{Dir: true})
+	}
+
+	if !head.Name().IsBranch() {
+		return discard(head.Hash())
+	}
+	branch := head.Name().Short()
+
+	auth, err := authOption()
+	if err != nil {
+		return err
+	}
+	remote := fmt.Sprintf("https://github.com/%s/%s.git", owner, repo)
+	refSpec := config.RefSpec(fmt.Sprintf("+refs/heads/%s:refs/remotes/origin/%s", branch, branch))
+	err = r.FetchContext(ctx, &git.FetchOptions{
+		RemoteURL:     remote,
+		RefSpecs:      []config.RefSpec{refSpec},
+		ClientOptions: []client.Option{auth},
+		Force:         true,
+	})
+	if err != nil && err != git.NoErrAlreadyUpToDate {
+		return fmt.Errorf("fetch: %w", err)
+	}
+
+	remoteRef, err := r.Reference(plumbing.NewRemoteReferenceName("origin", branch), true)
+	if err != nil {
+		// Branch doesn't exist on origin (never pushed); nothing to pull, so
+		// just discard local changes relative to the current commit.
+		return discard(head.Hash())
+	}
+	return discard(remoteRef.Hash())
 }
 
 // CreateLocalBranch checks out a new branch from the current HEAD in the

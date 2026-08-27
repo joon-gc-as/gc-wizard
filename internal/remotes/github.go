@@ -15,7 +15,7 @@ import (
 
 type githubService struct{}
 
-var Service = &githubService{}
+var GithubService = &githubService{}
 
 var githubClient = sync.OnceValue(func() *github.Client {
 	token := os.Getenv("GITHUB_TOKEN")

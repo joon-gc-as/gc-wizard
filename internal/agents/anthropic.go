@@ -51,7 +51,7 @@ func anthropicMaxTokens() int64 {
 	return maxTokens
 }
 
-// NOTE: PLEASE READ WHY client.Beta is being used over client.Messages
+// NOTE: PLEASE READ WHY client.Beta.Messages is being used over client.Messages
 //  - Tool Runner (client.Beta.Messages.NewToolRunner) — anytime you want the SDK to run the agentic loop
 //  instead of writing it manually (for loops/max iterations)
 //  - The prebuilt agent toolset (what's used here) or Managed Agents (client.Beta.Agents, client.Beta.Sessions,
@@ -102,7 +102,7 @@ func (s *anthropicService) ResolveGithubIssue(ctx context.Context, owner, repoNa
 	if owner == "" || repoName == "" {
 		return fmt.Errorf("issue event is missing repository owner/name")
 	}
-	ghs := remotes.Service
+	ghs := remotes.GithubService
 	defBranch, err := ghs.GetDefaultBranch(ctx, owner, repoName)
 	if err != nil {
 		return fmt.Errorf("get repository: %w", err)
@@ -170,7 +170,7 @@ func (s *anthropicService) ResolveGithubIssueComment(ctx context.Context, owner,
 	if owner == "" || repoName == "" {
 		return fmt.Errorf("issue comment event is missing repository owner/name")
 	}
-	ghs := remotes.Service
+	ghs := remotes.GithubService
 	defBranch, err := ghs.GetDefaultBranch(ctx, owner, repoName)
 	if err != nil {
 		return fmt.Errorf("get repository: %w", err)
@@ -213,7 +213,7 @@ func (s *anthropicService) ResolveGithubPullRequestReview(ctx context.Context, o
 		return fmt.Errorf("pull request #%d is missing a head branch", pr.GetNumber())
 	}
 
-	ghs := remotes.Service
+	ghs := remotes.GithubService
 	defBranch, err := ghs.GetDefaultBranch(ctx, owner, repoName)
 	if err != nil {
 		return fmt.Errorf("get repository: %w", err)
